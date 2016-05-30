@@ -1100,6 +1100,8 @@ object ReorderJoin extends Rule[LogicalPlan] with PredicateHelper {
   }
 }
 
+
+
 /**
  * Elimination of outer joins, if the predicates can restrict the result sets so that
  * all null-supplying rows are eliminated
