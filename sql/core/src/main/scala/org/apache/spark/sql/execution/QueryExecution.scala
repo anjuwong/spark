@@ -20,10 +20,13 @@ package org.apache.spark.sql.execution
 import java.nio.charset.StandardCharsets
 import java.sql.Timestamp
 
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession, SQLContext}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
+import org.apache.spark.sql.catalyst.plans._
+import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, ReturnAnswer}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
@@ -32,6 +35,8 @@ import org.apache.spark.sql.execution.exchange.{EnsureRequirements, ReuseExchang
 import org.apache.spark.sql.internal.SQLConf
 import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampType, _}
 
+
+
 /**
  * The primary workflow for executing relational queries using Spark.  Designed to allow easy
  * access to the intermediate phases of query execution for developers.
@@ -39,7 +44,7 @@ import org.apache.spark.sql.types.{BinaryType, DateType, DecimalType, TimestampT
  * While this is not a public class, we should avoid changing the function names for the sake of
  * changing them, because a lot of developers use the feature for debugging.
  */
-class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
+class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) extends Logging {
 
   // TODO: Move the planner an optimizer into here from SessionState.
   protected def planner = sparkSession.sessionState.planner
@@ -72,6 +77,36 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
 
   lazy val optimizedPlan: LogicalPlan = sparkSession.sessionState.optimizer.execute(withCachedData)
 
+// scalastyle: off
+  val empty = if (isMultiJoin(optimizedPlan)) {
+    logInfo("==== EXECUTING A MULTI-JOIN ====")
+    logInfo(optimizedPlan.toString)
+  }
+  else {
+    logInfo("==== GIVEN PLAN IS NOT A MULTI-JOIN ====")
+    logInfo(optimizedPlan.toString)
+  }
+
+  /**
+   * @author anjuwong
+   * Checks whether or not the given plan is a multijoin
+   */
+  def isMultiJoin(plan: LogicalPlan): Boolean = plan match {
+      case GlobalLimit(_, Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _))) => true
+      case LocalLimit(_, Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _))) => true
+      
+      /* These are the cases that fixed the camel's */
+      case GlobalLimit(_, Project(_, Join(Join(_, _, Inner, _), _, Inner, _))) => true
+      case LocalLimit(_, Project(_, Join(Join(_, _, Inner, _), _, Inner, _))) => true
+      
+      case Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _)) => true
+      case Join(Project(_, Join(_, _, Inner, _)), _, Inner, _) => true
+      case Join(Join(_, _, Inner, _), _, Inner, _) => true
+      case _ => false
+  }
+
+// scalastyle: on
+
   lazy val sparkPlan: SparkPlan = {
     SQLContext.setActive(sparkSession.wrapped)
     planner.plan(ReturnAnswer(optimizedPlan)).next()
@@ -81,7 +116,7 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
   // only used for execution.
   lazy val executedPlan: SparkPlan = prepareForExecution(sparkPlan)
 
-  /** Internal version of the RDD. Avoids copies and has no schema */
+  /** Internal version of the rdd. Avoids copies and has no schema */
   lazy val toRdd: RDD[InternalRow] = executedPlan.execute()
 
   /**
@@ -102,7 +137,6 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) {
 
   protected def stringOrError[A](f: => A): String =
     try f.toString catch { case e: Throwable => e.toString }
-
 
   /**
    * Returns the result as a hive compatible sequence of strings.  For native commands, the
