@@ -15,6 +15,14 @@
  * limitations under the License.
  */
 
+ // scalastyle:off
+ /*
+ * @author: Andrew Wong (anjuwong)
+ * UCLA CS188, Spring 2016
+ * Professor Paul Eggert
+ */
+ // scalastyle:on
+
 package org.apache.spark.sql.catalyst.plans.logical
 
 import org.apache.spark.sql.Row

@@ -342,9 +342,9 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
         execution.WindowExec(windowExprs, partitionSpec, orderSpec, planLater(child)) :: Nil
       case logical.Sample(lb, ub, withReplacement, seed, child) =>
         execution.SampleExec(lb, ub, withReplacement, seed, planLater(child)) :: Nil
-      case logical.LocalRelation(output, data) =>
+      case logical.LocalRelation(output, data) =>     // @anjuwong
         LocalTableScanExec(output, data) :: Nil
-      case logical.LocalRelationSample(output, data, iflag) =>  // @anjuwong
+      case logical.LocalRelationSample(output, data, iflag) =>
         LocalTableSampleScanExec(output, data, iflag) :: Nil
       case logical.LocalLimit(IntegerLiteral(limit), child) =>
         execution.LocalLimitExec(limit, planLater(child)) :: Nil

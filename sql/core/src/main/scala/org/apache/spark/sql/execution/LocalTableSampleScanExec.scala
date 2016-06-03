@@ -1,8 +1,27 @@
 /*
+ * Licensed to the Apache Software Foundation (ASF) under one or more
+ * contributor license agreements.  See the NOTICE file distributed with
+ * this work for additional information regarding copyright ownership.
+ * The ASF licenses this file to You under the Apache License, Version 2.0
+ * (the "License"); you may not use this file except in compliance with
+ * the License.  You may obtain a copy of the License at
+ *
+ *    http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+ // scalastyle:off
+ /*
  * @author: Andrew Wong (anjuwong)
  * UCLA CS188, Spring 2016
  * Professor Paul Eggert
  */
+ // scalastyle:on
 
 package org.apache.spark.sql.execution
 
@@ -14,8 +33,6 @@ import org.apache.spark.sql.execution.metric.SQLMetrics
 
 /**
  * Physical plan node for scanning a subset of data from a local collection.
- * partitionFactor: number of partitions
- * invertFlag: if true, will return partitions [1,2,3,4] instead of [0]
  */
 private[sql] case class LocalTableSampleScanExec(
     output: Seq[Attribute],
@@ -45,9 +62,11 @@ private[sql] case class LocalTableSampleScanExec(
     List(0)
   }
 
-  def getManyRDDChunks(r: RDD[InternalRow], partitionIndices: List[Int], retRDD: RDD[InternalRow]): RDD[InternalRow] partitionIndices match {
+  def getManyRDDChunks(r: RDD[InternalRow], partitionIndices: List[Int], retRDD: RDD[InternalRow]): RDD[InternalRow] = partitionIndices match {
     /* TODO: Add error checking on the bounds of num */
-    case num :: rest => val rddChunk = r.mapPartitionsWithIndex((idx, iter) => if (idx == num) iter else Iterator()).next()
+    case num :: rest =>
+      val rddChunk: RDD[InternalRow] = r.mapPartitionsWithIndex((idx, iter:Iterator[InternalRow]) => 
+        if (idx == num) iter else Iterator())
       getManyRDDChunks(r, rest, retRDD.union(rddChunk))
     case _ => retRDD
   }

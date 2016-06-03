@@ -15,6 +15,14 @@
  * limitations under the License.
  */
 
+ // scalastyle:off
+ /*
+ * @author: Andrew Wong (anjuwong)
+ * UCLA CS188, Spring 2016
+ * Professor Paul Eggert
+ */
+ // scalastyle:on
+
 package org.apache.spark.sql.execution
 
 import org.apache.spark.rdd.RDD
@@ -28,7 +36,9 @@ import org.apache.spark.sql.execution.metric.SQLMetrics
  */
 private[sql] case class LocalTableScanExec(
     output: Seq[Attribute],
-    rows: Seq[InternalRow]) extends LeafExecNode {
+    rows: Seq[InternalRow],
+    sampleFlag: Boolean = false,
+    invertFlag: Boolean = false) extends LeafExecNode {
 
   private[sql] override lazy val metrics = Map(
     "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
@@ -38,7 +48,7 @@ private[sql] case class LocalTableScanExec(
     rows.map(r => proj(r).copy()).toArray
   }
 
-  private lazy val rdd = sqlContext.sparkContext.parallelize(unsafeRows)
+  lazy val rdd = sqlContext.sparkContext.parallelize(unsafeRows)
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
