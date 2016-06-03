@@ -27,7 +27,7 @@ import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
-import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, ReturnAnswer}
+import org.apache.spark.sql.catalyst.plans.logical.{LogicalPlan, ReturnAnswer, LocalRelation, LocalRelationSample}
 import org.apache.spark.sql.catalyst.rules.Rule
 import org.apache.spark.sql.catalyst.util.DateTimeUtils
 import org.apache.spark.sql.execution.command.{DescribeTableCommand, ExecutedCommandExec}
@@ -78,34 +78,101 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
   lazy val optimizedPlan: LogicalPlan = sparkSession.sessionState.optimizer.execute(withCachedData)
 
 // scalastyle: off
+  /**
+   * @author anjuwong
+   * Checks whether or not the given plan is a multijoin
+   */
   val empty = if (isMultiJoin(optimizedPlan)) {
     logInfo("==== EXECUTING A MULTI-JOIN ====")
     logInfo(optimizedPlan.toString)
   }
   else {
-    logInfo("==== GIVEN PLAN IS NOT A MULTI-JOIN ====")
+    logInfo("==== PLAN IS NOT A MULTI-JOIN ====")
     logInfo(optimizedPlan.toString)
   }
-
-  /**
-   * @author anjuwong
-   * Checks whether or not the given plan is a multijoin
-   */
+  
   def isMultiJoin(plan: LogicalPlan): Boolean = plan match {
-      case GlobalLimit(_, Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _))) => true
-      case LocalLimit(_, Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _))) => true
-      
-      /* These are the cases that fixed the camel's */
-      case GlobalLimit(_, Project(_, Join(Join(_, _, Inner, _), _, Inner, _))) => true
-      case LocalLimit(_, Project(_, Join(Join(_, _, Inner, _), _, Inner, _))) => true
-      
-      case Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _)) => true
-      case Join(Project(_, Join(_, _, Inner, _)), _, Inner, _) => true
-      case Join(Join(_, _, Inner, _), _, Inner, _) => true
-      case _ => false
+    case GlobalLimit(_, Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _))) => true
+    case LocalLimit(_, Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _))) => true
+    
+    /* These are the cases that fixed the camel's back */
+    case GlobalLimit(_, Project(_, Join(Join(_, _, Inner, _), _, Inner, _))) => true
+    case LocalLimit(_, Project(_, Join(Join(_, _, Inner, _), _, Inner, _))) => true
+    
+    case Project(_, Join(Project(_, Join(_, _, Inner, _)), _, Inner, _)) => true
+    case Join(Project(_, Join(_, _, Inner, _)), _, Inner, _) => true
+    case Join(Join(_, _, Inner, _), _, Inner, _) => true
+    case _ => false
   }
 
-// scalastyle: on
+  def swapJoins(plan: LogicalPlan): LogicalPlan = plan match {
+    case GlobalLimit(e, Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2))) =>
+      GlobalLimit(e, Project(pl1, Join(Project(pl2, Join(a, c, Inner, cd2)), b, Inner, cd1)))
+    case LocalLimit(e, Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2))) =>
+      LocalLimit(e, Project(pl1, Join(Project(pl2, Join(a, c, Inner, cd2)), b, Inner, cd1)))
+
+    /* These are the cases that fixed the camel's back */
+    case GlobalLimit(e, Project(pl, Join(Join(a, b, Inner, cd1), c, Inner, cd2))) => 
+      GlobalLimit(e, Project(pl, Join(Join(a, c, Inner, cd2), b, Inner, cd1)))
+    case LocalLimit(e, Project(pl, Join(Join(a, b, Inner, cd1), c, Inner, cd2))) => 
+      LocalLimit(e, Project(pl, Join(Join(a, c, Inner, cd2), b, Inner, cd1)))
+    
+    case Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2)) => 
+      Project(pl1, Join(Project(pl2, Join(a, c, Inner, cd2)), b, Inner, cd1))
+    case Join(Project(pl, Join(a, b, Inner, cd1)), c, Inner, cd2) =>
+      Join(Project(pl, Join(a, c, Inner, cd2)), b, Inner, cd1)
+    case Join(Join(a, b, Inner, cd1), c, Inner, cd2) =>
+      Join(Join(a, c, Inner, cd2), b, Inner, cd1)
+    case p => p
+  }
+
+  def samplePlan(plan: LogicalPlan, invertFlag: Boolean): LogicalPlan = {
+    plan.mapChildren(node match {
+        case LocalRelation(output, data) => LocalRelationSample(output, data, invertFlag)
+        case _ => node
+      })
+  }
+
+  /* At this point, the data is already bound to the bottom-most node as logical.LocalRelation(output, data)
+   * The data is in the form Seq[InternalRow] in LocalRelation
+   * This gets casted to the leafExecNode LocalTableScanExec
+   * Instead of this, I want to:
+   *   1) swap the Join order
+   *   2) replace LocalRelation with LocalRelationSample 
+   */
+  lazy val swappedJoins = swapJoins(optimizedPlan)
+  lazy val optimizedSubPlanOrig = samplePlan(optimizedPlan, false)
+  lazy val optimizedSubPlanSwap = samplePlan(swappedJoins, false)
+
+  lazy val sparkSampledPlanOrig: SparkPlan = {
+    SQLContext.setActive(sparkSession.wrapped)
+    planner.plan(ReturnedAnswer(optimizedSubPlanOrig)).next()
+  }
+  lazy val sparkSampledPlanSwap: SparkPlan = {
+    SQLContext.setActive(sparkSession.wrapped)
+    planner.plan(ReturnedAnswer(optimizedSubPlanSwap)).next()
+  }
+
+  lazy val executedSampledPlanOrig: SparkPlan = prepareForExecution(sparkSampledPlanOrig)
+  lazy val executedSampledPlanSwap: SparkPlan = prepareForExecution(sparkSampledPlanSwap)
+
+  lazy val toSampledRddOrig: RDD[InternalRow] = executedSampledPlanOrig.execute()
+  lazy val toSampledRddSwap: RDD[InternalRow] = executedSampledPlanSwap.execute()
+
+  lazy val (sampleRDD: RDD[InternalRow], restOfOptimizedPlan: LogicalPlan) = if (toSampledRddOrig.count() > toSampledRddSwap.count()) {
+      /* Run the rest of the query,  */
+      (toSampledRddSwap, samplePlan(swappedJoins, true))
+  } else {
+      (toSampledRddOrig, samplePlan(optimizedPlan, true))
+  }
+  lazy val restOfSparkPlan: SparkPlan = {
+    SQLContext.setActive(sparkSession.wrapped)
+    planner.plan(ReturnedAnswer(restOfOptimizedPlan))
+  }
+
+  lazy val restOfExecutedPlan: SparkPlan = prepareForExecution(restOfSparkPlan)
+
+  lazy val restOfToRDD: RDD[InternalRow] = restOfExecutedPlan.execute()
 
   lazy val sparkPlan: SparkPlan = {
     SQLContext.setActive(sparkSession.wrapped)
@@ -117,7 +184,12 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
   lazy val executedPlan: SparkPlan = prepareForExecution(sparkPlan)
 
   /** Internal version of the rdd. Avoids copies and has no schema */
-  lazy val toRdd: RDD[InternalRow] = executedPlan.execute()
+  lazy val toRdd: RDD[InternalRow] = if (isMultiJoin(optimizedPlan)) { 
+    sampleRDD.union(restOfToRDD)
+  }  else  {
+    executedPlan.execute()
+  }
+// scalastyle: on
 
   /**
    * Prepares a planned [[SparkPlan]] for execution by inserting shuffle operations and internal
