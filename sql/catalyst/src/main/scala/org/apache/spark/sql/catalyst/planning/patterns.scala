@@ -34,6 +34,9 @@ import org.apache.spark.sql.types.IntegerType
  * [[org.apache.spark.sql.catalyst.expressions.Alias Aliases]] are in-lined/substituted if
  * necessary.
  */
+// object PhysicalOperation extends PhysicalOperationBehavior
+// object SampledPhysicalOperation extends PhysicalOperationBehavior
+
 object PhysicalOperation extends PredicateHelper {
   type ReturnType = (Seq[NamedExpression], Seq[Expression], LogicalPlan)
 

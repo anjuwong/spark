@@ -84,7 +84,7 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
    * @author anjuwong
    * Checks whether or not the given plan is a multijoin
    */
-  val empty = if (isMultiJoin(optimizedPlan)) {
+  val empty = if (checkMultiJoins(optimizedPlan)) {
     logInfo("==== EXECUTING A MULTI-JOIN ====")
     logInfo(optimizedPlan.toString)
   }
@@ -125,11 +125,42 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
   }
 
   def samplePlan(plan: LogicalPlan, invertFlag: Boolean): LogicalPlan = {
+    // search for LogicalRelation or PhysicalOperation(_, _, LogicalRelation)
     plan.mapChildren(node => node match {
         case LocalRelation(output, data) => logInfo("Sampling a local relation")
         LocalRelationSample(output, data, invertFlag)
         case _ => node
       })
+  }
+
+  def checkMultiJoins(plan: LogicalPlan): Boolean = {
+    /* Map will check each node for the MULTIJOIN and return a preorder Seq[Boolean]
+     * Then, we check to see if any of the children were MULTIJOINS */
+    val multiJoinSeq = plan.map({
+        case Join(Join(a, b, Inner, cd1), c, Inner, cd2) => true
+        case Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2)) => true
+        case _ => false
+    })
+    multiJoinSeq.exists(_ == true)
+  }
+  // def checkMultiJoins(plan: LogicalPlan): Boolean = plan match {
+  //   case leaf: LeafNode => false
+  //   case Join(Join(a, b, Inner, cd1) c, Inner, cd2) => true
+  //   case Join(Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2))) => true
+  //   case node => val childMultiSeq = node.map(checkMultiJoins)
+  //     childMultiSeq.exists(_ == true)
+  // }
+  def swapMultiJoins(plan: LogicalPlan): LogicalPlan = plan match {
+    // leafnode => return
+    // JOIN(JOIN(a,b), c) => JOIN(JOIN(a,c), b)
+    // node => node.mapChildren(swapChildJoins(node))
+    // case Join() => Join()
+    case leaf: LeafNode => leaf
+    case Join(Join(a, b, Inner, cd1), c, Inner, cd2) =>
+      Join(Join(a, c, Inner, cd2), b, Inner, cd1)
+    case Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2)) =>
+      Project(pl1, Join(Project(pl2, Join(a, c, Inner, cd2)), b, Inner, cd1))
+    case node => node.mapChildren(swapMultiJoins)
   }
 
   /* At this point the data is already bound to the bottommost node as LocalRelation(output, data)

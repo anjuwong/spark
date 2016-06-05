@@ -26,6 +26,7 @@ import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
+// import org.apache.spark.sql.catalyst.planning.SampledPhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.{DataSourceScanExec, SparkPlan}
 
@@ -54,6 +55,14 @@ import org.apache.spark.sql.execution.{DataSourceScanExec, SparkPlan}
  */
 private[sql] object FileSourceStrategy extends Strategy with Logging {
   def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
+    // case SampledPhysicalOperation(
+    //   projects,
+    //   filters,
+    //   l @ LogicalRelation(files: HadoopFsRelation, _, _)) =>
+    //   // Do all the same stuff as PhysicalOperation, but return a SampledFilterExec instead
+    //   // Alternatively, find a way to call the filter, but have the child be filtered
+    //   Nil
+
     case PhysicalOperation(projects, filters, l @ LogicalRelation(files: HadoopFsRelation, _, _)) =>
       // Filters on this relation fall into four categories based on where we can use them to avoid
       // reading unneeded data:
@@ -134,6 +143,7 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
             FilePartition(bucketId, bucketed.getOrElse(bucketId, Nil))
           }
 
+        // @anjuwong Here, we actually read a file to RDD
         case _ =>
           val defaultMaxSplitBytes = files.sparkSession.sessionState.conf.filesMaxPartitionBytes
           val openCostInBytes = files.sparkSession.sessionState.conf.filesOpenCostInBytes
@@ -145,9 +155,19 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
           logInfo(s"Planning scan with bin packing, max size: $maxSplitBytes bytes, " +
             s"open cost is considered as scanning $openCostInBytes bytes.")
 
+
+          // @anjuwong I think this is where the multiple partitions are read
           val splitFiles = selectedPartitions.flatMap { partition =>
             partition.files.flatMap { file =>
               val blockLocations = getBlockLocations(file)
+
+              // @anjuwong For each file, get the locations of the files and
+              //   iterate through each file. offset is the start of a given
+              //   block, remaining defines how much of the file remains,
+              //   returns the PartitionedFile chunk, which gets flatMapped
+              //   splitFiles is a Seq[PartitionedFile], at most maxSplitBytes
+              // * I think this only reads partitions from file and doesn't
+              //   work with .repartition() at all
               (0L until file.getLen by maxSplitBytes).map { offset =>
                 val remaining = file.getLen - offset
                 val size = if (remaining > maxSplitBytes) maxSplitBytes else remaining
@@ -156,7 +176,10 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
               }
             }
           }.toArray.sortBy(_.length)(implicitly[Ordering[Long]].reverse)
-
+          // logInfo("=== HERE ARE THE FILE PARTITIONS ===")
+          // splitFiles.foreach({ file => logInfo(file.toString)})
+          logInfo("=== HERE ARE THE FILE COUNTS plannedPartitions ===")
+          logInfo(splitFiles.length + " splitFiles")
           val partitions = new ArrayBuffer[FilePartition]
           val currentFiles = new ArrayBuffer[PartitionedFile]
           var currentSize = 0L
@@ -189,6 +212,8 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
             addFile(file)
           }
           closePartition()
+          logInfo("=== HERE ARE THE PARTITION COUNTS plannedPartitions ===")
+          logInfo(partitions.size + " partitions")
           partitions
       }
 
