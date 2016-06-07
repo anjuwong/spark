@@ -29,10 +29,12 @@ import org.apache.spark.sql.sources.BaseRelation
  * changing the output attributes' IDs.  The `expectedOutputAttributes` parameter is used for
  * this purpose.  See https://issues.apache.org/jira/browse/SPARK-10741 for more details.
  */
-case class LogicalRelation(
+case class SampledLogicalRelation(
     relation: BaseRelation,
     expectedOutputAttributes: Option[Seq[Attribute]] = None,
-    metastoreTableIdentifier: Option[TableIdentifier] = None)
+    metastoreTableIdentifier: Option[TableIdentifier] = None,
+    numSamples: Integer,
+    invertFlag: Boolean)
   extends LeafNode with MultiInstanceRelation {
 
   override val output: Seq[AttributeReference] = {
@@ -79,11 +81,18 @@ case class LogicalRelation(
   /** Used to lookup original attribute capitalization */
   val attributeMap: AttributeMap[AttributeReference] = AttributeMap(output.map(o => (o, o)))
 
-  def newInstance(): this.type =
+  // def newInstance(): this.type =
+  //   SampledLogicalRelation(
+  //     relation,
+  //     expectedOutputAttributes,
+  //     metastoreTableIdentifier,
+  //     numSamples,
+  //     invertFlag).asInstanceOf[this.type]
+  def newInstance(): LogicalRelation =
     LogicalRelation(
       relation,
       expectedOutputAttributes,
-      metastoreTableIdentifier).asInstanceOf[this.type]
+      metastoreTableIdentifier).asInstanceOf[LogicalRelation]
 
-  override def simpleString: String = s"Relation[${output.mkString(",")}] $relation"
+  override def simpleString: String = s"Sampled Relation[${output.mkString(",")}] $relation"
 }

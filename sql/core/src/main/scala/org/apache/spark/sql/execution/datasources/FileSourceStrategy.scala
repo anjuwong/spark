@@ -25,10 +25,13 @@ import org.apache.spark.internal.Logging
 import org.apache.spark.sql._
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions._
+import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
-// import org.apache.spark.sql.catalyst.planning.SampledPhysicalOperation
+import org.apache.spark.sql.catalyst.planning.SampledPhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.execution.{DataSourceScanExec, SparkPlan}
+import org.apache.spark.sql.sources.Filter
+import org.apache.spark.sql.types.StructType
 
 /**
  * A strategy for planning scans over collections of files that might be partitioned or bucketed
@@ -55,15 +58,83 @@ import org.apache.spark.sql.execution.{DataSourceScanExec, SparkPlan}
  */
 private[sql] object FileSourceStrategy extends Strategy with Logging {
   def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
-    // case SampledPhysicalOperation(
-    //   projects,
-    //   filters,
-    //   l @ LogicalRelation(files: HadoopFsRelation, _, _)) =>
-    //   // Do all the same stuff as PhysicalOperation, but return a SampledFilterExec instead
-    //   // Alternatively, find a way to call the filter, but have the child be filtered
-    //   Nil
 
     case PhysicalOperation(projects, filters, l @ LogicalRelation(files: HadoopFsRelation, _, _)) =>
+      val (readDataColumns,
+        partitionColumns,
+        readFile,
+        finalPartitions,
+        pushedDownFilters,
+        prunedDataSchema,
+        afterScanFilters): (Seq[Attribute],
+          Seq[Attribute],
+          PartitionedFile => Iterator[InternalRow],
+          Seq[FilePartition],
+          Seq[Filter],
+          StructType,
+          Seq[Expression]) = splitPartitions(projects, filters, l, files)
+      scanFiles(readDataColumns,
+        partitionColumns,
+        files,
+        readFile,
+        finalPartitions,
+        pushedDownFilters,
+        prunedDataSchema,
+        afterScanFilters,
+        projects)
+
+    case SampledPhysicalOperation(projects, filters,
+      sl @ SampledLogicalRelation(files: HadoopFsRelation, _, _, numSamples, invertFlag)) =>
+      val (readDataColumns,
+        partitionColumns,
+        readFile,
+        plannedPartitions,
+        pushedDownFilters,
+        prunedDataSchema,
+        afterScanFilters): (Seq[Attribute],
+          Seq[Attribute],
+          PartitionedFile => Iterator[InternalRow],
+          Seq[FilePartition],
+          Seq[Filter],
+          StructType,
+          Seq[Expression]) = splitPartitions(projects, filters, sl, files)
+      logInfo("=== Number of filters: " + filters.size)
+      val finalPartitions =
+        if (numSamples < 5) {
+          plannedPartitions
+        } else {
+          val samplePartitionLimit = math.ceil(plannedPartitions.size / numSamples.toDouble).toInt
+          if (invertFlag) {
+            plannedPartitions.slice(samplePartitionLimit, plannedPartitions.size)
+          }
+          else {
+            plannedPartitions.slice(0, samplePartitionLimit)
+          }
+        }
+
+      scanFiles(readDataColumns,
+        partitionColumns,
+        files,
+        readFile,
+        finalPartitions,
+        pushedDownFilters,
+        prunedDataSchema,
+        afterScanFilters,
+        projects)
+
+    case _ => Nil
+  }
+
+  private def splitPartitions(projects: Seq[NamedExpression],
+    filters: Seq[Expression],
+    l: LogicalPlan,
+    files: HadoopFsRelation): (Seq[Attribute],
+    Seq[Attribute],
+    PartitionedFile => Iterator[InternalRow],
+    Seq[FilePartition],
+    Seq[Filter],
+    StructType,
+    Seq[Expression]) = {
       // Filters on this relation fall into four categories based on where we can use them to avoid
       // reading unneeded data:
       //  - partition keys only - used to prune directories to read
@@ -75,6 +146,8 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
       // The attribute name of predicate could be different than the one in schema in case of
       // case insensitive, we should change them to match the one in schema, so we donot need to
       // worry about case sensitivity anymore.
+      logInfo("=== SPLITTING THE PARTITIONS ===")
+      logInfo(l.toString)
       val normalizedFilters = filters.map { e =>
         e transform {
           case a: AttributeReference =>
@@ -216,31 +289,48 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
           logInfo(partitions.size + " partitions")
           partitions
       }
+      (readDataColumns,
+      partitionColumns,
+      readFile,
+      plannedPartitions,
+      pushedDownFilters,
+      prunedDataSchema,
+      afterScanFilters.toSeq)
+  }
 
-      val scan =
-        DataSourceScanExec.create(
-          readDataColumns ++ partitionColumns,
-          new FileScanRDD(
-            files.sparkSession,
-            readFile,
-            plannedPartitions),
-          files,
-          Map(
-            "Format" -> files.fileFormat.toString,
-            "PushedFilters" -> pushedDownFilters.mkString("[", ", ", "]"),
-            "ReadSchema" -> prunedDataSchema.simpleString))
+  /* @anjuwong Create the scan execution with the proper filters and projections */
+  private def scanFiles(
+    readDataColumns: Seq[Attribute],
+    partitionColumns: Seq[Attribute],
+    files: HadoopFsRelation,
+    readFile: PartitionedFile => Iterator[InternalRow],
+    finalPartitions: Seq[FilePartition],
+    pushedDownFilters: Seq[Filter],
+    prunedDataSchema: StructType,
+    afterScanFilters: Seq[Expression],
+    projects: Seq[NamedExpression]): Seq[SparkPlan] = {
+    val scan =
+      DataSourceScanExec.create(
+        readDataColumns ++ partitionColumns,
+        new FileScanRDD(
+          files.sparkSession,
+          readFile,
+          finalPartitions),
+        files,
+        Map(
+          "Format" -> files.fileFormat.toString,
+          "PushedFilters" -> pushedDownFilters.mkString("[", ", ", "]"),
+          "ReadSchema" -> prunedDataSchema.simpleString))
 
-      val afterScanFilter = afterScanFilters.toSeq.reduceOption(expressions.And)
-      val withFilter = afterScanFilter.map(execution.FilterExec(_, scan)).getOrElse(scan)
-      val withProjections = if (projects == withFilter.output) {
-        withFilter
-      } else {
-        execution.ProjectExec(projects, withFilter)
-      }
+    val afterScanFilter = afterScanFilters.toSeq.reduceOption(expressions.And)
+    val withFilter = afterScanFilter.map(execution.FilterExec(_, scan)).getOrElse(scan)
+    val withProjections = if (projects == withFilter.output) {
+      withFilter
+    } else {
+      execution.ProjectExec(projects, withFilter)
+    }
 
-      withProjections :: Nil
-
-    case _ => Nil
+    withProjections :: Nil
   }
 
   private def getBlockLocations(file: FileStatus): Array[BlockLocation] = file match {

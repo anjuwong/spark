@@ -276,6 +276,13 @@ private[sql] abstract class SparkStrategies extends QueryPlanner[SparkPlan] {
           filters,
           identity[Seq[Expression]], // All filters still need to be evaluated.
           InMemoryTableScanExec(_, filters, mem)) :: Nil
+
+      // case SampledPhysicalOperation(projectList, filters, mem: InMemoryRelation) =>
+      //   pruneFilterProject(
+      //     projectList,
+      //     filters,
+      //     identity[Seq[Expression]], // All filters still need to be evaluated.
+      //     InMemoryTableScanExec(_, filters, mem)) :: Nil
       case _ => Nil
     }
   }

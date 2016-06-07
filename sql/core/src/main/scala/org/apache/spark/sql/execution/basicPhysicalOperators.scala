@@ -76,26 +76,8 @@ case class ProjectExec(projectList: Seq[NamedExpression], child: SparkPlan)
 
 
 /** Physical plan for Filter. */
-case class FilterExec(condition: Expression, child: SparkPlan) extends FilterExecBehavior
-
-case class SampledFilterExec(condition: Expression, child: SparkPlan) extends FilterExecBehavior {
-  // Same as FilterExec but the doExecute should only return a sample
-  protected override def doExecute(): RDD[InternalRow] = {
-    val numOutputRows = longMetric("numOutputRows")
-    child.execute().mapPartitionsInternal { iter =>
-      val predicate = newPredicate(condition, child.output)
-      iter.filter { row =>
-        val r = predicate(row)
-        if (r) numOutputRows += 1
-        r
-      }
-    }
-  }
-}
-
-abstract class FilterExecBehavior extends UnaryExecNode with CodegenSupport with PredicateHelper {
-  def condition: Expression
-  def child: SparkPlan
+case class FilterExec(condition: Expression, child: SparkPlan)
+  extends UnaryExecNode with CodegenSupport with PredicateHelper {
 
   // Split out all the IsNotNulls from condition.
   private val (notNullPreds, otherPreds) = splitConjunctivePredicates(condition).partition {

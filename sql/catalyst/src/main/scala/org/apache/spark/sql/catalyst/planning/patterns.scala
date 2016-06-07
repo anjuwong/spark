@@ -36,6 +36,52 @@ import org.apache.spark.sql.types.IntegerType
  */
 // object PhysicalOperation extends PhysicalOperationBehavior
 // object SampledPhysicalOperation extends PhysicalOperationBehavior
+object SampledPhysicalOperation extends PredicateHelper {
+  type ReturnType = (Seq[NamedExpression], Seq[Expression], LogicalPlan)
+
+  // TODO Make sure that swapping LogicalRelation with SampledLogicalRelation is enough.
+  // Hunch: might have to swap SampledPhysicalOperation as well
+  def unapply(plan: LogicalPlan): Option[ReturnType] = {
+    val (fields, filters, child, _) = collectProjectsAndFilters(plan)
+    Some((fields.getOrElse(child.output), filters, child))
+  }
+  private def collectProjectsAndFilters(plan: LogicalPlan):
+      (Option[Seq[NamedExpression]], Seq[Expression], LogicalPlan, Map[Attribute, Expression]) =
+    plan match {
+      case Project(fields, child) if fields.forall(_.deterministic) =>
+        val (_, filters, other, aliases) = collectProjectsAndFilters(child)
+        val substitutedFields = fields.map(substitute(aliases)).asInstanceOf[Seq[NamedExpression]]
+        (Some(substitutedFields), filters, other, collectAliases(substitutedFields))
+
+      case Filter(condition, child) if condition.deterministic =>
+        val (fields, filters, other, aliases) = collectProjectsAndFilters(child)
+        val substitutedCondition = substitute(aliases)(condition)
+        (fields, filters ++ splitConjunctivePredicates(substitutedCondition), other, aliases)
+
+      case BroadcastHint(child) =>
+        collectProjectsAndFilters(child)
+
+      case other =>
+        (None, Nil, other, Map.empty)
+    }
+
+  private def collectAliases(fields: Seq[Expression]): Map[Attribute, Expression] = fields.collect {
+    case a @ Alias(child, _) => a.toAttribute -> child
+  }.toMap
+
+  private def substitute(aliases: Map[Attribute, Expression])(expr: Expression): Expression = {
+    expr.transform {
+      case a @ Alias(ref: AttributeReference, name) =>
+        aliases.get(ref)
+          .map(Alias(_, name)(a.exprId, a.qualifier, isGenerated = a.isGenerated))
+          .getOrElse(a)
+
+      case a: AttributeReference =>
+        aliases.get(a)
+          .map(Alias(_, a.name)(a.exprId, a.qualifier, isGenerated = a.isGenerated)).getOrElse(a)
+    }
+  }
+}
 
 object PhysicalOperation extends PredicateHelper {
   type ReturnType = (Seq[NamedExpression], Seq[Expression], LogicalPlan)

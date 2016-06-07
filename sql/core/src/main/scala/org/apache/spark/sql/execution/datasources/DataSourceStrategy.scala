@@ -28,6 +28,7 @@ import org.apache.spark.sql.catalyst.analysis.UnresolvedAttribute
 import org.apache.spark.sql.catalyst.expressions
 import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.planning.PhysicalOperation
+import org.apache.spark.sql.catalyst.planning.SampledPhysicalOperation
 import org.apache.spark.sql.catalyst.plans.logical
 import org.apache.spark.sql.catalyst.plans.logical.LogicalPlan
 import org.apache.spark.sql.catalyst.plans.physical.HashPartitioning
@@ -57,6 +58,42 @@ private[sql] object DataSourceAnalysis extends Rule[LogicalPlan] {
       val outputPath = t.location.paths.head
       val inputPaths = query.collect {
         case LogicalRelation(r: HadoopFsRelation, _, _) => r.location.paths
+        case SampledLogicalRelation(r: HadoopFsRelation, _, _, _, _) => r.location.paths
+      }.flatten
+
+      val mode = if (overwrite) SaveMode.Overwrite else SaveMode.Append
+      if (overwrite && inputPaths.contains(outputPath)) {
+        throw new AnalysisException(
+          "Cannot overwrite a path that is also being read from.")
+      }
+
+      InsertIntoHadoopFsRelation(
+        outputPath,
+        t.partitionSchema.fields.map(_.name).map(UnresolvedAttribute(_)),
+        t.bucketSpec,
+        t.fileFormat,
+        () => t.refresh(),
+        t.options,
+        query,
+        mode)
+    case i @ logical.InsertIntoTable(
+           l @ SampledLogicalRelation(t: HadoopFsRelation, _, _, _, _),
+              part,
+              query,
+              overwrite,
+              false)
+        if query.resolved && t.schema.asNullable == query.schema.asNullable =>
+
+      // Sanity checks
+      if (t.location.paths.size != 1) {
+        throw new AnalysisException(
+          "Can only write data to relations with a single path.")
+      }
+
+      val outputPath = t.location.paths.head
+      val inputPaths = query.collect {
+        case LogicalRelation(r: HadoopFsRelation, _, _) => r.location.paths
+        case SampledLogicalRelation(r: HadoopFsRelation, _, _, _, _) => r.location.paths
       }.flatten
 
       val mode = if (overwrite) SaveMode.Overwrite else SaveMode.Append
@@ -104,12 +141,34 @@ private[sql] object DataSourceStrategy extends Strategy with Logging {
         filters,
         (a, _) => toCatalystRDD(l, a, t.buildScan(a.map(_.name).toArray))) :: Nil
 
+    // @anjuwong
+    case SampledPhysicalOperation(projects, filters,
+      sl @ SampledLogicalRelation(t: PrunedScan, e, m, _, _)) =>
+      val l = LogicalRelation(t, e, m)
+      pruneFilterProject(
+        l,
+        projects,
+        filters,
+        (a, _) => toCatalystRDD(l, a, t.buildScan(a.map(_.name).toArray))) :: Nil
+
     case l @ LogicalRelation(baseRelation: TableScan, _, _) =>
+      execution.DataSourceScanExec.create(
+        l.output, toCatalystRDD(l, baseRelation.buildScan()), baseRelation) :: Nil
+
+    // @anjuwong
+    case sl @ SampledLogicalRelation(baseRelation: TableScan, e, m, _, _) =>
+      val l = LogicalRelation(baseRelation, e, m)
       execution.DataSourceScanExec.create(
         l.output, toCatalystRDD(l, baseRelation.buildScan()), baseRelation) :: Nil
 
     case i @ logical.InsertIntoTable(l @ LogicalRelation(t: InsertableRelation, _, _),
       part, query, overwrite, false) if part.isEmpty =>
+      ExecutedCommandExec(InsertIntoDataSource(l, query, overwrite)) :: Nil
+
+    // @anjuwong
+    case i @ logical.InsertIntoTable(sl @ SampledLogicalRelation(t: InsertableRelation, e, m, _, _),
+      part, query, overwrite, false) if part.isEmpty =>
+      val l = LogicalRelation(t, e, m)
       ExecutedCommandExec(InsertIntoDataSource(l, query, overwrite)) :: Nil
 
     case _ => Nil
