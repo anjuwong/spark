@@ -97,12 +97,18 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
   def samplePlan(plan: LogicalPlan, numSamples: Int, invertFlag: Boolean): LogicalPlan = {
     // search for LogicalRelation or PhysicalOperation(_, _, LogicalRelation)
     plan.mapChildren(node => node match {
-        case Project(p, Filter(e, LogicalRelation(r, expOut, tId))) =>
-          Project(p, Filter(e, SampledLogicalRelation(r, expOut, tId, numSamples, invertFlag)))
+        // case Project(p, Filter(e, LogicalRelation(r, expOut, tId))) =>
+        //   Project(p, Filter(e, SampledLogicalRelation(r, expOut, tId, numSamples, invertFlag)))
         // case Filter(e, LogicalRelation(r, expOut, tId)) =>
         //   Filter(e, SampledLogicalRelation(r, expOut, tId, numSamples, invertFlag))
-        // case LogicalRelation(relation, expectedOut, tableId) =>
-        //   SampledLogicalRelation(relation, expectedOut, tableId, numSamples, invertFlag)
+        case l @ LogicalRelation(relation, expectedOut, tableId) =>
+          logInfo("=== SAMPLING A LogicalRelation IN QueryExecution ===")
+          logInfo(l.toString)
+          logInfo(expectedOut.toString)
+          val sl = SampledLogicalRelation(l, numSamples, invertFlag)
+          logInfo(sl.toString)
+          logInfo(expectedOut.toString)
+          sl
         case leaf: LeafNode => leaf
         case _ => samplePlan(node, numSamples, invertFlag)
       })

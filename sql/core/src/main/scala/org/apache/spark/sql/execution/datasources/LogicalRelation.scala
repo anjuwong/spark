@@ -52,8 +52,8 @@ case class LogicalRelation(
   // Logical Relations are distinct if they have different output for the sake of transformations.
   override def equals(other: Any): Boolean = other match {
     case l @ LogicalRelation(otherRelation, _, _) => relation == otherRelation && output == l.output
-    case sl @ SampledLogicalRelation(otherRelation, _, _, _, _) =>
-      relation == otherRelation && output == sl.output
+    case SampledLogicalRelation(l @ LogicalRelation(otherRelation, _, _), _, _) =>
+      relation == otherRelation && output == l.output
     case _ => false
   }
 
@@ -63,7 +63,8 @@ case class LogicalRelation(
 
   override def sameResult(otherPlan: LogicalPlan): Boolean = otherPlan match {
     case LogicalRelation(otherRelation, _, _) => relation == otherRelation
-    case SampledLogicalRelation(otherRelation, _, _, _, _) => relation == otherRelation
+    case SampledLogicalRelation(LogicalRelation(otherRelation, _, _), _, _) =>
+      relation == otherRelation
     case _ => false
   }
 

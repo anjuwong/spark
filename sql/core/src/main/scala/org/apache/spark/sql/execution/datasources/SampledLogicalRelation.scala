@@ -30,16 +30,14 @@ import org.apache.spark.sql.sources.BaseRelation
  * this purpose.  See https://issues.apache.org/jira/browse/SPARK-10741 for more details.
  */
 case class SampledLogicalRelation(
-    relation: BaseRelation,
-    expectedOutputAttributes: Option[Seq[Attribute]] = None,
-    metastoreTableIdentifier: Option[TableIdentifier] = None,
+    lr: LogicalRelation,
     numSamples: Integer,
     invertFlag: Boolean)
   extends LeafNode with MultiInstanceRelation {
 
   override val output: Seq[AttributeReference] = {
-    val attrs = relation.schema.toAttributes
-    expectedOutputAttributes.map { expectedAttrs =>
+    val attrs = lr.relation.schema.toAttributes
+    lr.expectedOutputAttributes.map { expectedAttrs =>
       assert(expectedAttrs.length == attrs.length)
       attrs.zip(expectedAttrs).map {
         // We should respect the attribute names provided by base relation and only use the
@@ -53,29 +51,31 @@ case class SampledLogicalRelation(
 
   // Logical Relations are distinct if they have different output for the sake of transformations.
   override def equals(other: Any): Boolean = other match {
-    case l @ LogicalRelation(otherRelation, _, _) => relation == otherRelation && output == l.output
-    case sl @ SampledLogicalRelation(otherRelation, _, _, _, _) =>
-      relation == otherRelation && output == sl.output
+    case l @ LogicalRelation(otherRelation, _, _) =>
+      lr.relation == otherRelation && output == l.output
+    case SampledLogicalRelation(l @ LogicalRelation(otherRelation, _, _), _, _) =>
+      lr.relation == otherRelation && output == l.output
     case _ => false
   }
 
   override def hashCode: Int = {
-    com.google.common.base.Objects.hashCode(relation, output)
+    com.google.common.base.Objects.hashCode(lr.relation, output)
   }
 
   override def sameResult(otherPlan: LogicalPlan): Boolean = otherPlan match {
-    case LogicalRelation(otherRelation, _, _) => relation == otherRelation
-    case SampledLogicalRelation(otherRelation, _, _, _, _) => relation == otherRelation
+    case LogicalRelation(otherRelation, _, _) => lr.relation == otherRelation
+    case SampledLogicalRelation(LogicalRelation(otherRelation, _, _), _, _) =>
+      lr.relation == otherRelation
     case _ => false
   }
 
   // When comparing two LogicalRelations from within LogicalPlan.sameResult, we only need
   // LogicalRelation.cleanArgs to return Seq(relation), since expectedOutputAttribute's
   // expId can be different but the relation is still the same.
-  override lazy val cleanArgs: Seq[Any] = Seq(relation)
+  override lazy val cleanArgs: Seq[Any] = Seq(lr.relation)
 
   @transient override lazy val statistics: Statistics = Statistics(
-    sizeInBytes = BigInt(relation.sizeInBytes)
+    sizeInBytes = BigInt(lr.relation.sizeInBytes)
   )
 
   /** Used to lookup original attribute capitalization */
@@ -90,9 +90,9 @@ case class SampledLogicalRelation(
   //     invertFlag).asInstanceOf[this.type]
   def newInstance(): LogicalRelation =
     LogicalRelation(
-      relation,
-      expectedOutputAttributes,
-      metastoreTableIdentifier).asInstanceOf[LogicalRelation]
+      lr.relation,
+      lr.expectedOutputAttributes,
+      lr.metastoreTableIdentifier).asInstanceOf[LogicalRelation]
 
-  override def simpleString: String = s"Sampled Relation[${output.mkString(",")}] $relation"
+  override def simpleString: String = s"Sampled Relation[${output.mkString(",")}] ${lr.relation}"
 }

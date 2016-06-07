@@ -60,6 +60,8 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
   def apply(plan: LogicalPlan): Seq[SparkPlan] = plan match {
 
     case PhysicalOperation(projects, filters, l @ LogicalRelation(files: HadoopFsRelation, _, _)) =>
+      logInfo("=== FILTERS ===")
+      logInfo(filters.toString)
       val (readDataColumns,
         partitionColumns,
         readFile,
@@ -84,7 +86,12 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
         projects)
 
     case SampledPhysicalOperation(projects, filters,
-      sl @ SampledLogicalRelation(files: HadoopFsRelation, _, _, numSamples, invertFlag)) =>
+      SampledLogicalRelation(sl @ LogicalRelation(files: HadoopFsRelation, _, _),
+        numSamples, invertFlag)) =>
+      logInfo("=== FILTERS ===")
+      logInfo(filters.toString)
+      logInfo("=== RELATION ===")
+      logInfo(files.toString)
       val (readDataColumns,
         partitionColumns,
         readFile,
@@ -98,7 +105,6 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
           Seq[Filter],
           StructType,
           Seq[Expression]) = splitPartitions(projects, filters, sl, files)
-      logInfo("=== Number of filters: " + filters.size)
       val finalPartitions =
         if (numSamples < 5) {
           plannedPartitions
