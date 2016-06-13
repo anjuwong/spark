@@ -85,7 +85,7 @@ private[sql] object FileSourceStrategy extends Strategy with Logging {
         afterScanFilters,
         projects)
 
-    case SampledPhysicalOperation(projects, filters,
+    case PhysicalOperation(projects, filters,
       SampledLogicalRelation(sl @ LogicalRelation(files: HadoopFsRelation, _, _),
         numSamples, invertFlag)) =>
       logInfo("=== FILTERS ===")

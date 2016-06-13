@@ -18,6 +18,7 @@
 package org.apache.spark.sql.execution.joins
 
 import org.apache.spark._
+import org.apache.spark.internal.Logging
 import org.apache.spark.rdd.{CartesianPartition, CartesianRDD, RDD}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.expressions.{Attribute, Expression, JoinedRow, UnsafeRow}
@@ -78,11 +79,10 @@ class UnsafeCartesianRDD(left : RDD[UnsafeRow], right : RDD[UnsafeRow], numField
   }
 }
 
-
-case class CartesianProductExec(
-    left: SparkPlan,
-    right: SparkPlan,
-    condition: Option[Expression]) extends BinaryExecNode {
+case class SwappedCartesianProductExec(
+  left: SparkPlan,
+  right: SparkPlan,
+  condition: Option[Expression]) extends BinaryExecNode {
   override def output: Seq[Attribute] = left.output ++ right.output
 
   override private[sql] lazy val metrics = Map(
@@ -90,6 +90,50 @@ case class CartesianProductExec(
 
   protected override def doExecute(): RDD[InternalRow] = {
     val numOutputRows = longMetric("numOutputRows")
+
+    /* Match left with Join or CartesianProductExec
+     * Take left's right and store as this's right
+     * Complete left's operation using this's right as left's right */
+    val leftResults = left.execute().asInstanceOf[RDD[UnsafeRow]]
+    val rightResults = right.execute().asInstanceOf[RDD[UnsafeRow]]
+    val pair = new UnsafeCartesianRDD(leftResults, rightResults, right.output.size)
+    pair.mapPartitionsInternal { iter =>
+      val joiner = GenerateUnsafeRowJoiner.create(left.schema, right.schema)
+      val filtered = if (condition.isDefined) {
+        val boundCondition: (InternalRow) => Boolean =
+          newPredicate(condition.get, left.output ++ right.output)
+        val joined = new JoinedRow
+
+        iter.filter { r =>
+          boundCondition(joined(r._1, r._2))
+        }
+      } else {
+        iter
+      }
+      filtered.map { r =>
+        numOutputRows += 1
+        joiner.join(r._1, r._2)
+      }
+    }
+  }
+}
+
+case class CartesianProductExec(
+    left: SparkPlan,
+    right: SparkPlan,
+    condition: Option[Expression]) extends BinaryExecNode with Logging {
+  override def output: Seq[Attribute] = left.output ++ right.output
+
+  override private[sql] lazy val metrics = Map(
+    "numOutputRows" -> SQLMetrics.createMetric(sparkContext, "number of output rows"))
+
+  protected override def doExecute(): RDD[InternalRow] = {
+    val numOutputRows = longMetric("numOutputRows")
+    logInfo("=== CARTESIAN EXECUTION LEFT ===")
+    logInfo(left.toString)
+
+    logInfo("=== CARTESIAN EXECUTION RIGHT ===")
+    logInfo(right.toString)
 
     val leftResults = left.execute().asInstanceOf[RDD[UnsafeRow]]
     val rightResults = right.execute().asInstanceOf[RDD[UnsafeRow]]

@@ -25,6 +25,8 @@ import org.apache.spark.rdd.RDD
 import org.apache.spark.sql.{AnalysisException, Row, SparkSession, SQLContext}
 import org.apache.spark.sql.catalyst.InternalRow
 import org.apache.spark.sql.catalyst.analysis.UnsupportedOperationChecker
+import org.apache.spark.sql.catalyst.expressions
+import org.apache.spark.sql.catalyst.expressions._
 import org.apache.spark.sql.catalyst.plans._
 import org.apache.spark.sql.catalyst.plans.logical._
 import org.apache.spark.sql.catalyst.plans.logical.{LocalRelation, LocalRelationSample, LogicalPlan, ReturnAnswer}
@@ -78,36 +80,19 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
 
   lazy val optimizedPlan: LogicalPlan = sparkSession.sessionState.optimizer.execute(withCachedData)
 
-
-// TODO: move back to separate sample files and create a new package for them
 // scalastyle: off
   /**
    * @author anjuwong
    * Checks whether or not the given plan is a multijoin
    */
-  val empty = if (checkMultiJoins(optimizedPlan)) {
-    logInfo("==== EXECUTING A MULTI-JOIN ====")
-    logInfo(optimizedPlan.toString)
-  }
-  else {
-    logInfo("==== PLAN IS NOT A MULTI-JOIN ====")
-    logInfo(optimizedPlan.toString)
-  }
 
   def samplePlan(plan: LogicalPlan, numSamples: Int, invertFlag: Boolean): LogicalPlan = {
-    // search for LogicalRelation or PhysicalOperation(_, _, LogicalRelation)
     plan.mapChildren(node => node match {
-        // case Project(p, Filter(e, LogicalRelation(r, expOut, tId))) =>
-        //   Project(p, Filter(e, SampledLogicalRelation(r, expOut, tId, numSamples, invertFlag)))
-        // case Filter(e, LogicalRelation(r, expOut, tId)) =>
-        //   Filter(e, SampledLogicalRelation(r, expOut, tId, numSamples, invertFlag))
         case l @ LogicalRelation(relation, expectedOut, tableId) =>
           logInfo("=== SAMPLING A LogicalRelation IN QueryExecution ===")
           logInfo(l.toString)
-          logInfo(expectedOut.toString)
           val sl = SampledLogicalRelation(l, numSamples, invertFlag)
           logInfo(sl.toString)
-          logInfo(expectedOut.toString)
           sl
         case leaf: LeafNode => leaf
         case _ => samplePlan(node, numSamples, invertFlag)
@@ -124,22 +109,31 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
     })
     multiJoinSeq.exists(_ == true)
   }
-  // def checkMultiJoins(plan: LogicalPlan): Boolean = plan match {
-  //   case leaf: LeafNode => false
-  //   case Join(Join(a, b, Inner, cd1) c, Inner, cd2) => true
-  //   case Join(Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2))) => true
-  //   case node => val childMultiSeq = node.map(checkMultiJoins)
-  //     childMultiSeq.exists(_ == true)
-  // }
+
   def swapMultiJoins(plan: LogicalPlan): LogicalPlan = plan match {
-    // leafnode => return
-    // JOIN(JOIN(a,b), c) => JOIN(JOIN(a,c), b)
-    // node => node.mapChildren(swapChildJoins(node))
-    // case Join() => Join()
     case leaf: LeafNode => leaf
-    case Join(Join(a, b, Inner, cd1), c, Inner, cd2) =>
+    case Join(Join(a: LogicalPlan, b: LogicalPlan, Inner, cd1: Option[Expression]),
+      c: LogicalPlan, Inner, cd2: Option[Expression]) =>
+      val j = Join(Join(a, c, Inner, cd2), b, Inner, cd1)
+
+      // jOut.codition = cd1
+      // jOut.right = b
+      // jIn.condition = cd2
+      // jIn.right = c
+      // jOut.left = jIn
+      // jOut
       Join(Join(a, c, Inner, cd2), b, Inner, cd1)
-    case Project(pl1, Join(Project(pl2, Join(a, b, Inner, cd1)), c, Inner, cd2)) =>
+    case Project(pl1: Seq[NamedExpression], Join(Project(pl2: Seq[NamedExpression],
+      Join(a: LogicalPlan, b: LogicalPlan, Inner, cd1: Option[Expression])),
+      c: LogicalPlan, Inner, cd2: Option[Expression])) =>
+      // jOut.codition = cd1
+      // jOut.right = b
+      // jIn.condition = cd2
+      // jIn.right = c
+      // jOut.left = jIn
+      // pIn.child = jIn
+      // pOut.child = jOut
+      // pOut
       Project(pl1, Join(Project(pl2, Join(a, c, Inner, cd2)), b, Inner, cd1))
     case node => node.mapChildren(swapMultiJoins)
   }
@@ -151,7 +145,7 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
    *   1) swap the Join order
    *   2) replace LocalRelation with LocalRelationSample
    */
-  val numSamples = 5
+  lazy val numSamples = 5
   lazy val swappedJoins = swapMultiJoins(optimizedPlan)
   lazy val optimizedSubPlanOrig = samplePlan(optimizedPlan, numSamples, false)
   lazy val optimizedSubPlanSwap = samplePlan(swappedJoins, numSamples, false)
@@ -171,10 +165,11 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
   lazy val toSampledRddOrig: RDD[InternalRow] = executedSampledPlanOrig.execute()
   lazy val toSampledRddSwap: RDD[InternalRow] = executedSampledPlanSwap.execute()
 
-  lazy val (restOfOptimizedPlan, sampleRDD): (LogicalPlan, RDD[InternalRow]) =
+  val (restOfOptimizedPlan, sampleRDD): (LogicalPlan, RDD[InternalRow]) =
+    // (samplePlan(optimizedPlan, numSamples, true), toSampledRddOrig)
   if (toSampledRddOrig.count() > toSampledRddSwap.count()) {
     /* Run the rest of the query,  */
-    logInfo("=== @anjuwong Swapped JOIN is cheaper, executing the rest! ===")
+    logInfo("=== Swapped JOIN is cheaper, executing the rest! ===")
     (samplePlan(swappedJoins, numSamples, true), toSampledRddSwap)
   } else {
     logInfo("=== Original JOIN is cheaper, keeping it the same! ===")
@@ -191,8 +186,8 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
 
   lazy val sparkPlan: SparkPlan = {
     SQLContext.setActive(sparkSession.wrapped)
-    planner.plan(ReturnAnswer(samplePlan(optimizedPlan, 5, false))).next()
-    // planner.plan(ReturnAnswer(swapMultiJoins(optimizedPlan))).next()
+    // planner.plan(ReturnAnswer(samplePlan(optimizedPlan, numSamples, false))).next()
+    planner.plan(ReturnAnswer(optimizedPlan)).next()
   }
 
   // executedPlan should not be used to initialize any SparkPlan. It should be
@@ -201,10 +196,10 @@ class QueryExecution(val sparkSession: SparkSession, val logical: LogicalPlan) e
 
   /** Internal version of the rdd. Avoids copies and has no schema */
   lazy val toRdd: RDD[InternalRow] = if (checkMultiJoins(optimizedPlan)) {
-    logInfo("=== toRdd CALLED ON MULTIJOIN ===")
-    logInfo(swappedJoins.toString)
+    logInfo("=== SAMPLING BOTH JOIN ORDERS ===")
     sampleRDD.union(restOfToRDD)
   } else {
+    logInfo("=== NOT SAMPLING THE JOIN ORDERS ===")
     executedPlan.execute()
   }
 // scalastyle: on

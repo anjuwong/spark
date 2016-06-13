@@ -34,13 +34,13 @@ import org.apache.spark.sql.types.IntegerType
  * [[org.apache.spark.sql.catalyst.expressions.Alias Aliases]] are in-lined/substituted if
  * necessary.
  */
-// object PhysicalOperation extends PhysicalOperationBehavior
-// object SampledPhysicalOperation extends PhysicalOperationBehavior
+
+/* @anjuwong TODO: This is deprecated, only SampledLogicalRelation is needed */
 object SampledPhysicalOperation extends PredicateHelper {
   type ReturnType = (Seq[NamedExpression], Seq[Expression], LogicalPlan)
-
-  // TODO Make sure that swapping LogicalRelation with SampledLogicalRelation is enough.
-  // Hunch: might have to swap SampledPhysicalOperation as well
+  /**
+   * Has more or less the same behavior as PhysicalOperation, but 
+   */
   def unapply(plan: LogicalPlan): Option[ReturnType] = {
     val (fields, filters, child, _) = collectProjectsAndFilters(plan)
     Some((fields.getOrElse(child.output), filters, child))
